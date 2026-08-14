@@ -21,6 +21,11 @@ abstract class LogsLocalSource {
     bool temporary = true,
   });
 
+  Future<String> saveExportFile({
+    required Uint8List data,
+    required String path,
+  });
+
   Future<void> deleteLogs();
 
   Future<void> clearTempFiles();

@@ -10,15 +10,29 @@ def getGprProp = { String name ->
     return null
 }
 
+def getGprUser = {
+    return getGprProp("gpr.user") ?: System.getenv("GITHUB_ACTOR") ?: "TrustTunnel"
+}
 
 allprojects {
+    buildscript {
+        configurations.configureEach {
+            resolutionStrategy.eachDependency { details ->
+                if (details.requested.group == "com.android.tools.build" && details.requested.name == "gradle") {
+                    details.useVersion "8.11.1"
+                    details.because "file_picker 10.3.10 hardcodes AGP 8.5.1, whose layoutlib-api dependency is unavailable in Google Maven"
+                }
+            }
+        }
+    }
+
     repositories {
         google()
         mavenCentral()
         maven {
             url = uri("https://maven.pkg.github.com/TrustTunnel/TrustTunnelClient")
             credentials {
-                username = ""
+                username = getGprUser()
                 password = getGprProp("gpr.key")
             }
             authentication { basic(BasicAuthentication) }

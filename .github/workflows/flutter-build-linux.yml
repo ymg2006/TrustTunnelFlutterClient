@@ -1,0 +1,84 @@
+name: Flutter Build Linux
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        default: trusttunnel-linux
+      artifact-path:
+        type: string
+        default: build/linux/x64/release/bundle/**
+  workflow_dispatch:
+    inputs:
+      artifact-name:
+        type: string
+        default: trusttunnel-linux
+      artifact-path:
+        type: string
+        default: build/linux/x64/release/bundle/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev policykit-1 python3-venv
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.8'
+          channel: stable
+          cache: true
+
+      - name: Enable Linux desktop
+        run: flutter config --enable-linux-desktop
+
+      - name: Set up Conan
+        run: |
+          python3 -m venv "$RUNNER_TEMP/conan-venv"
+          "$RUNNER_TEMP/conan-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/conan-venv/bin/python" -m pip install "conan>=2,<3"
+          echo "$RUNNER_TEMP/conan-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/conan-venv/bin/conan" profile detect --force
+
+      - name: Restore Conan cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: linux-conan2-${{ hashFiles('plugins/vpn_plugin/linux/CMakeLists.txt') }}
+          restore-keys: linux-conan2-
+
+      - name: Verify TrustTunnel Conan bootstrap is present
+        run: |
+          echo "Checked out SHA: $GITHUB_SHA"
+          grep -F 'bootstrap_conan_deps.py' plugins/vpn_plugin/linux/CMakeLists.txt
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: |
+          dart run build_runner build --delete-conflicting-outputs
+          dart run intl_utils:generate
+          (cd plugins/vpn_plugin && dart run pigeon --input pigeons/platform_api.dart --dart_out lib/platform_api.g.dart --swift_out ios/Classes/PlatformApi.g.swift)
+          (cd plugins/vpn_plugin && dart run pigeon --input pigeons/platform_api.dart --swift_out macos/Classes/PlatformApi.g.swift)
+
+      - name: Build Linux
+        run: flutter build linux --release --no-pub -v
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error

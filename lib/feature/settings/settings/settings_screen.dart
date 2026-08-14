@@ -6,8 +6,10 @@ import 'package:trusttunnel/feature/settings/app_logging/widgets/app_logging_scr
 import 'package:trusttunnel/feature/settings/excluded_routes/widgets/excluded_routes_screen.dart';
 import 'package:trusttunnel/feature/settings/launch_and_connection/widgets/launch_and_connection_screen.dart';
 import 'package:trusttunnel/feature/settings/launch_and_connection/widgets/scope/launch_and_connection_scope.dart';
+import 'package:trusttunnel/feature/settings/logs_manager/widgets/scope/logs_manager_scope.dart';
 import 'package:trusttunnel/feature/settings/query_log/widgets/query_log_screen.dart';
 import 'package:trusttunnel/feature/settings/settings/widgets/download_app_logs_tile.dart';
+import 'package:trusttunnel/feature/settings/settings/widgets/theme_mode_tile.dart';
 import 'package:trusttunnel/feature/settings/settings_about/about_screen.dart';
 import 'package:trusttunnel/widgets/common/custom_arrow_list_tile.dart';
 import 'package:trusttunnel/widgets/custom_app_bar.dart';
@@ -18,44 +20,52 @@ class SettingsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ScaffoldWrapper(
-    child: Scaffold(
-      appBar: CustomAppBar(
-        title: context.ln.settings,
-      ),
-      body: ListView(
-        children: [
-          CustomArrowListTile(
-            title: context.ln.connectionLog,
-            onTap: () => _pushQueryLogScreen(context),
+    child: ScaffoldMessenger(
+      child: LogsManagerScope(
+        child: Builder(
+          builder: (context) => Scaffold(
+            appBar: CustomAppBar(
+              title: context.ln.settings,
+            ),
+            body: ListView(
+              children: [
+                CustomArrowListTile(
+                  title: context.ln.connectionLog,
+                  onTap: () => _pushQueryLogScreen(context),
+                ),
+                const Divider(),
+                CustomArrowListTile(
+                  title: context.ln.appLogging,
+                  onTap: () => _pushAppLoggingScreen(context),
+                ),
+                const Divider(),
+                const ThemeModeTile(),
+                const Divider(),
+                const DownloadAppLogsTile(),
+                const Divider(),
+                CustomArrowListTile(
+                  title: context.ln.launchAndConnection,
+                  onTap: () => _pushLaunchAndConnectionScreen(context),
+                ),
+                const Divider(),
+                CustomArrowListTile(
+                  title: context.ln.excludedRoutes,
+                  onTap: () => _pushExcludedRoutesScreen(context),
+                ),
+                const Divider(),
+                CustomArrowListTile(
+                  title: context.ln.followUsOnGithub,
+                  onTap: _openGithubOrganization,
+                ),
+                const Divider(),
+                CustomArrowListTile(
+                  title: context.ln.about,
+                  onTap: () => _pushAboutScreen(context),
+                ),
+              ],
+            ),
           ),
-          const Divider(),
-          CustomArrowListTile(
-            title: context.ln.appLogging,
-            onTap: () => _pushAppLoggingScreen(context),
-          ),
-          const Divider(),
-          const DownloadAppLogsTile(),
-          const Divider(),
-          CustomArrowListTile(
-            title: context.ln.launchAndConnection,
-            onTap: () => _pushLaunchAndConnectionScreen(context),
-          ),
-          const Divider(),
-          CustomArrowListTile(
-            title: context.ln.excludedRoutes,
-            onTap: () => _pushExcludedRoutesScreen(context),
-          ),
-          const Divider(),
-          CustomArrowListTile(
-            title: context.ln.followUsOnGithub,
-            onTap: _openGithubOrganization,
-          ),
-          const Divider(),
-          CustomArrowListTile(
-            title: context.ln.about,
-            onTap: () => _pushAboutScreen(context),
-          ),
-        ],
+        ),
       ),
     ),
   );

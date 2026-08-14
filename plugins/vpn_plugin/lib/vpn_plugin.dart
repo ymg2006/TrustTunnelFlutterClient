@@ -103,17 +103,26 @@ class VpnPluginImpl implements VpnPlugin {
        _logsReader = LogsReader(),
        _codec = const ConfigurationCodec(),
        _vpnChannel = channel ?? const EventChannel('vpn_plugin_event_channel'),
-       _queryLogChannel = logChannel ?? const EventChannel('vpn_plugin_event_channel_query_log');
+       _queryLogChannel = logChannel ?? const EventChannel('vpn_plugin_event_channel_query_log'),
+       _linuxVpnChannel = const MethodChannel('ivpn_manager');
 
   final ConfigurationCodec _codec;
   final IVpnManager _api;
   final EventChannel _vpnChannel;
   final EventChannel _queryLogChannel;
+  final MethodChannel _linuxVpnChannel;
   final LogsReader _logsReader;
   SharedPreferences? _storage;
 
   @override
-  Future<VpnManagerState> getCurrentState() => _api.getCurrentState();
+  Future<VpnManagerState> getCurrentState() async {
+    if (Platform.isLinux) {
+      final raw = await _linuxVpnChannel.invokeMethod<int>('getCurrentState');
+      return _mapNativeToState(raw);
+    }
+
+    return _api.getCurrentState();
+  }
 
   final _logEncoder = QueryLogEncoder();
 
@@ -121,12 +130,22 @@ class VpnPluginImpl implements VpnPlugin {
   @override
   Future<void> start({required Configuration configuration}) {
     final config = _codec.encode(configuration);
+    if (Platform.isLinux) {
+      return _linuxVpnChannel.invokeMethod<void>('start', <String, Object?>{
+        'config': config,
+      });
+    }
+
     return _api.start(config: config);
   }
 
   /// {@macro vpn_plugin_update_configuration}
   @override
   Future<void> updateConfiguration({required Configuration? configuration}) {
+    if (Platform.isLinux) {
+      return Future<void>.value();
+    }
+
     String? config;
 
     if (configuration != null) {
@@ -138,7 +157,13 @@ class VpnPluginImpl implements VpnPlugin {
 
   /// {@macro vpn_plugin_stop}
   @override
-  Future<void> stop() => _api.stop();
+  Future<void> stop() {
+    if (Platform.isLinux) {
+      return _linuxVpnChannel.invokeMethod<void>('stop');
+    }
+
+    return _api.stop();
+  }
 
   /// {@macro vpn_plugin_states}
   @override
@@ -185,6 +210,11 @@ class VpnPluginImpl implements VpnPlugin {
   @override
   Future<List<String>> fetchLogsPath() async {
     _storage ??= await SharedPreferences.getInstance();
+    if (Platform.isLinux) {
+      await _storage!.setStringList('logs_paths_vpn_plugin', const []);
+      return const [];
+    }
+
     final logsPaths = await _api.exportLogs();
     await _storage!.setStringList('logs_paths_vpn_plugin', logsPaths);
     return logsPaths;
@@ -192,7 +222,9 @@ class VpnPluginImpl implements VpnPlugin {
 
   @override
   Future<void> clearLogs() async {
-    await _api.clearLogs();
+    if (!Platform.isLinux) {
+      await _api.clearLogs();
+    }
 
     _storage ??= await SharedPreferences.getInstance();
     final logPaths = _storage?.getStringList('logs_paths_vpn_plugin');

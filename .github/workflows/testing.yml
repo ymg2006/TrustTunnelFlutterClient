@@ -83,3 +83,20 @@ jobs:
       macos-signing-type: developer_id
       artifact-name: trusttunnel-macos-pr
       artifact-path: macos/build/TrustTunnel.dmg
+
+  build-windows:
+    if: >-
+      github.event.pull_request.draft == false
+    uses: ./.github/workflows/flutter-build-windows.yml
+    with:
+      artifact-name: trusttunnel-windows-pr
+      artifact-path: build/windows/x64/runner/Release/**
+
+  build-linux:
+    if: >-
+      github.event.pull_request.draft == false
+    uses: ./.github/workflows/flutter-build-linux.yml
+    secrets: inherit
+    with:
+      artifact-name: trusttunnel-linux-pr
+      artifact-path: build/linux/x64/release/bundle/**

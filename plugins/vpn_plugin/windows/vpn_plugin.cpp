@@ -1,8 +1,11 @@
 #include "vpn_plugin.h"
 
 #include <algorithm>
-#include <chrono>
-#include <thread>
+#include <cctype>
+
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+#include <vpn/vpn_easy.h>
+#endif
 
 using flutter::EncodableValue;
 
@@ -35,12 +38,11 @@ void MockStorage::SetupMockData() {
 }
 
 // ---------------- StreamHandler ----------------
-VpnEventStreamHandler::VpnEventStreamHandler(MockStorage* storage,
-                                             std::shared_ptr<flutter::TaskRunner> ui_runner)
-    : storage_(storage), ui_runner_(std::move(ui_runner)) {}
+VpnEventStreamHandler::VpnEventStreamHandler() = default;
 
 void VpnEventStreamHandler::EmitState(VpnManagerState state) {
   std::lock_guard<std::mutex> lock(mutex_);
+  state_ = state;
   if (!sink_) return;
   sink_->Success(EncodableValue(static_cast<int64_t>(state)));
 }
@@ -53,7 +55,7 @@ VpnEventStreamHandler::OnListenInternal(
     std::lock_guard<std::mutex> lock(mutex_);
     sink_ = std::move(events);
   }
-  EmitState(storage_->CurrentVpnState());
+  EmitState(state_);
   return nullptr;
 }
 
@@ -65,27 +67,49 @@ VpnEventStreamHandler::OnCancelInternal(const EncodableValue* /*arguments*/) {
 }
 
 // ---------------- Managers ----------------
-IVpnManagerImpl::IVpnManagerImpl(MockStorage* storage, VpnEventStreamHandler* handler,
-                                 std::shared_ptr<flutter::TaskRunner> ui_runner)
-    : storage_(storage), handler_(handler), ui_runner_(std::move(ui_runner)) {}
+IVpnManagerImpl::IVpnManagerImpl(VpnEventStreamHandler* handler)
+    : handler_(handler) {}
 
-void IVpnManagerImpl::Start() {
-  storage_->CurrentVpnState() = VpnManagerState::kConnecting;
-  handler_->EmitState(storage_->CurrentVpnState());
+IVpnManagerImpl::~IVpnManagerImpl() { Stop(); }
 
-  std::thread([this]() {
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    storage_->CurrentVpnState() = VpnManagerState::kConnected;
-    ui_runner_->PostTask([this]() { handler_->EmitState(storage_->CurrentVpnState()); });
-  }).detach();
+std::optional<FlutterError> IVpnManagerImpl::Start(const std::string& config) {
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  state_ = VpnManagerState::kConnecting;
+  handler_->EmitState(state_);
+  vpn_easy_start(config.c_str(),
+                 [](void* arg, int state) {
+                   auto* self = static_cast<IVpnManagerImpl*>(arg);
+                   self->state_ = static_cast<VpnManagerState>(state);
+                   self->handler_->EmitState(self->state_);
+                 },
+                 this);
+  return std::nullopt;
+#else
+  return FlutterError("native-backend-missing",
+                      "The Windows TrustTunnel native library is not bundled.");
+#endif
 }
 
-void IVpnManagerImpl::Stop() {
-  storage_->CurrentVpnState() = VpnManagerState::kDisconnected;
-  handler_->EmitState(storage_->CurrentVpnState());
+std::optional<FlutterError> IVpnManagerImpl::Stop() {
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  vpn_easy_stop();
+#endif
+  state_ = VpnManagerState::kDisconnected;
+  if (handler_) handler_->EmitState(state_);
+  return std::nullopt;
 }
 
-VpnManagerState IVpnManagerImpl::GetCurrentState() { return storage_->CurrentVpnState(); }
+std::optional<FlutterError> IVpnManagerImpl::UpdateConfiguration(const std::string* /*config*/) {
+  return std::nullopt;
+}
+
+ErrorOr<VpnManagerState> IVpnManagerImpl::GetCurrentState() { return state_; }
+
+ErrorOr<flutter::EncodableList> IVpnManagerImpl::ExportLogs() {
+  return flutter::EncodableList{};
+}
+
+std::optional<FlutterError> IVpnManagerImpl::ClearLogs() { return std::nullopt; }
 
 AddNewServerResult ServersManagerImpl::AddNewServer(const std::string& /*name*/,
                                                     const std::string& ip,
@@ -216,40 +240,35 @@ void RoutingProfilesManagerImpl::RemoveAllRules(int64_t id) {
 // ---------------- VpnPlugin ----------------
 void VpnPlugin::RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar) {
   auto messenger = registrar->messenger();
-  auto ui_runner = registrar->task_runner();
 
   auto storage = std::make_shared<MockStorage>();
-  auto handler = std::make_unique<VpnEventStreamHandler>(storage.get(), ui_runner);
+  auto handler = std::make_unique<VpnEventStreamHandler>();
+  auto* handler_ptr = handler.get();
 
   auto event_channel = std::make_unique<flutter::EventChannel<EncodableValue>>(
       messenger, "vpn_plugin_event_channel", &flutter::StandardMethodCodec::GetInstance());
-  event_channel->SetStreamHandler(std::unique_ptr<VpnEventStreamHandler>(handler.get()));
+  event_channel->SetStreamHandler(std::move(handler));
 
-  auto vpn_manager = std::make_unique<IVpnManagerImpl>(storage.get(), handler.get(), ui_runner);
+  auto vpn_manager = std::make_unique<IVpnManagerImpl>(handler_ptr);
   auto storage_manager = std::make_unique<StorageManagerImpl>(storage.get());
   auto servers_manager = std::make_unique<ServersManagerImpl>(storage.get());
   auto routing_manager = std::make_unique<RoutingProfilesManagerImpl>(storage.get());
 
-  IVpnManagerSetupSetUp(messenger, vpn_manager.get());
-  IStorageManagerSetupSetUp(messenger, storage_manager.get());
-  ServersManagerSetupSetUp(messenger, servers_manager.get());
-  RoutingProfilesManagerSetupSetUp(messenger, routing_manager.get());
+  IVpnManager::SetUp(messenger, vpn_manager.get());
 
   registrar->AddPlugin(std::make_unique<VpnPlugin>(
-      std::move(event_channel), storage, std::move(handler), std::move(vpn_manager),
+      std::move(event_channel), nullptr, std::move(vpn_manager),
       std::move(storage_manager), std::move(servers_manager), std::move(routing_manager)));
 }
 
 VpnPlugin::VpnPlugin(
     std::unique_ptr<flutter::EventChannel<EncodableValue>> event_channel,
-    std::shared_ptr<MockStorage> storage,
     std::unique_ptr<VpnEventStreamHandler> handler,
     std::unique_ptr<IVpnManagerImpl> vpn_manager,
     std::unique_ptr<StorageManagerImpl> storage_manager,
     std::unique_ptr<ServersManagerImpl> servers_manager,
     std::unique_ptr<RoutingProfilesManagerImpl> routing_manager)
     : event_channel_(std::move(event_channel)),
-      storage_(std::move(storage)),
       handler_(std::move(handler)),
       vpn_manager_(std::move(vpn_manager)),
       storage_manager_(std::move(storage_manager)),

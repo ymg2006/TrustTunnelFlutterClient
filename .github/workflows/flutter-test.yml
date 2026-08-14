@@ -29,8 +29,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      GPR_KEY: ${{ secrets.PUBLIC_REPO_GPR_KEY  }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

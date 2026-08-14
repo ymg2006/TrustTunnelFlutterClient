@@ -15,7 +15,7 @@
   · <a href="https://agrd.io/android_trusttunnel">Play Store</a>
 </p>
 
-**TrustTunnel Flutter Client** is a mobile VPN client for **Android and iOS**, built with Flutter.
+**TrustTunnel Flutter Client** is a cross-platform VPN client for **Android, iOS, Windows, Linux, and macOS**, built with Flutter.
 It provides a clean and focused graphical interface for connecting to **self-hosted TrustTunnel VPN servers**.
 
 The application acts as a thin, user-facing layer on top of the TrustTunnel VPN stack. It does not attempt to hide the underlying architecture or networking model. Instead, it exposes core concepts — servers, endpoints, credentials, and transport protocols — in a clear and predictable form suitable for both beginners and experienced users.
@@ -25,7 +25,7 @@ Whether you are setting up your first self-hosted VPN or operating your own infr
 ### Why TrustTunnel Flutter Client
 
 - **Cross-platform by design**
-  Built with Flutter, the client provides a consistent experience on Android and iOS while integrating directly with system VPN APIs on each platform.
+  Built with Flutter, the client provides a consistent experience across mobile and desktop while integrating with native VPN components on each platform.
 
 - **Clean separation of concerns**
   VPN functionality lives in a dedicated Flutter plugin with native bindings, while the application focuses on user experience and configuration. This architecture keeps the codebase understandable and easy to maintain.
@@ -67,6 +67,7 @@ Before working with the application, ensure that your environment is ready:
 
 - **Flutter SDK 3.38.3 or newer**
 - Android and/or iOS development tooling configured on your system
+- Windows, Linux, and/or macOS desktop tooling configured if you are building desktop targets
 - Basic build utilities, including `make`
 
 Flutter installation instructions are available in the official documentation:
@@ -84,13 +85,47 @@ cd TrustTunnelFlutterClient
 
 #### 2. Use make to initialize project
 ```shell
-make init
+flutter pub get
+dart run intl_utils:generate
+flutter gen-l10n
+dart run build_runner build --delete-conflicting-outputs
+
+Push-Location plugins/vpn_plugin
+dart run pigeon --input pigeons/platform_api.dart `
+  --swift_out ios/Classes/PlatformApi.g.swift `
+  --swift_out macos/Classes/PlatformApi.g.swift
+Pop-Location
 ```
 
-#### 3. Configure GitHub Packages access
+#### 3. Configure TrustTunnelClient native dependency
 
-Project depends on artifacts published in GitHub Packages.
-To download them, you must provide a **personal access token** via environment variables used by Maven.
+GitHub Actions builds the TrustTunnelClient Android and Apple adapters from
+source, so CI does not require GitHub Packages access or a `GPR_KEY` secret.
+
+For local Android builds without a token, clone TrustTunnelClient and enable the
+Gradle composite build:
+
+```shell
+mkdir -p .deps
+git clone https://github.com/TrustTunnel/TrustTunnelClient.git .deps/TrustTunnelClient
+cp android/template.libs.gradle android/libs.gradle
+```
+
+Edit `android/libs.gradle` and replace `/path-to-own/vpn-libs/platform/android`
+with `../.deps/TrustTunnelClient/platform/android`.
+
+For local iOS/macOS builds without a token, build the Apple frameworks and point
+CocoaPods at the local adapter:
+
+```shell
+cd .deps/TrustTunnelClient/platform/apple
+./build_framework.sh
+cd -
+export TRUSTTUNNEL_CLIENT_APPLE_PATH="$PWD/.deps/TrustTunnelClient/platform/apple"
+```
+
+If you prefer to use the prebuilt artifacts instead, provide a GitHub Packages
+token via environment variables used by Maven and CocoaPods.
 
 **Create a personal access token**
 
@@ -112,7 +147,8 @@ As an alternative to exporting the variable in your shell, you can pass the toke
 GPR_KEY=<your_personal_access_token> flutter run
 ```
 
-Without this variable, builds will fail when resolving GitHub Packages dependencies.
+Without this variable or the local source setup above, builds will fail when
+resolving GitHub Packages dependencies.
 
 ---
 
@@ -162,6 +198,44 @@ or:
 ```shell
 flutter run
 ```
+
+Platform-specific release builds:
+
+```shell
+# Android
+flutter build apk --release
+flutter build appbundle --release
+
+# iOS, from macOS with Xcode signing configured
+flutter build ios --release
+
+# Windows, from Windows with Visual Studio C++ desktop workload installed
+flutter build windows --release
+
+# Linux, from Linux with Flutter desktop enabled
+flutter config --enable-linux-desktop
+flutter build linux --release
+
+# macOS, from macOS with Xcode and CocoaPods installed
+flutter config --enable-macos-desktop
+cd macos
+pod install --repo-update
+cd ..
+flutter build macos --release
+```
+
+Linux desktop build dependencies vary by distribution. On Debian/Ubuntu-based systems, start with:
+
+```shell
+sudo apt update
+sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+```
+
+Desktop VPN runtime notes:
+
+- **Windows** uses the native TrustTunnel Windows adapter. Normal connect should not require running the Flutter app as Administrator, but adapter/service installation may require Administrator once.
+- **Linux** uses the native TrustTunnel core. When the app is not already privileged, it starts a bundled native helper through PolicyKit (`pkexec`) so the OS handles the password prompt. The helper links TrustTunnel native code directly; it does not run the TrustTunnel CLI.
+- **macOS** uses the Apple/NetworkExtension adapter path. Build and runtime require the proper Apple signing, entitlements, and system VPN/network extension approval prompts.
 
 > [!NOTE]
 > TrustTunnel Flutter Client requires a TrustTunnel VPN server.

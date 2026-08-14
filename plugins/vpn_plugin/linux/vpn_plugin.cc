@@ -2,9 +2,23 @@
 
 #include <flutter_linux/flutter_linux.h>
 #include <glib-object.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
+#include <cstdlib>
+#include <limits.h>
+#include <memory>
+#include <signal.h>
 #include <string.h>
+
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+#include <toml++/toml.h>
+#include <unistd.h>
+
+#include "vpn/trusttunnel/client.h"
+#include "vpn/trusttunnel/config.h"
+#include "vpn/vpn.h"
+#endif
 
 typedef enum {
   VPN_STATE_DISCONNECTED = 0,
@@ -61,6 +75,16 @@ typedef struct {
   VpnState   vpn_state;
   GPtrArray* requests;
 } MockStorage;
+
+#ifndef VPN_PLUGIN
+#define VPN_PLUGIN(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), vpn_plugin_get_type(), VpnPlugin))
+#endif
+
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+struct NativeVpnClient {
+  std::unique_ptr<ag::TrustTunnelClient> client;
+};
+#endif
 
 
 static gchar* g_strdup_or_empty(const gchar* s) { return g_strdup(s ? s : ""); }
@@ -229,7 +253,7 @@ struct _VpnPlugin {
 
   // EventChannel: vpn_plugin_event_channel
   FlEventChannel* event_channel;
-  FlEventSink* event_sink;
+  gboolean event_listening;
 
   // MethodChannels
   FlMethodChannel* ch_ivpn;
@@ -238,36 +262,258 @@ struct _VpnPlugin {
   FlMethodChannel* ch_routing;
 
   guint connect_timeout_id;
+
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  NativeVpnClient* native_client;
+  GPid helper_pid;
+  gchar* helper_config_path;
+#endif
 };
 
 G_DEFINE_TYPE(VpnPlugin, vpn_plugin, g_object_get_type())
 
 // -------- EventChannel emit --------
 static void emit_vpn_state(VpnPlugin* self, VpnState st) {
-  if (!self->event_sink) return;
-  FlValue* value = fl_value_new_int(st);
-  fl_event_sink_send(self->event_sink, value, NULL);
+  if (!self->event_channel || !self->event_listening) return;
+  g_autoptr(FlValue) value = fl_value_new_int(st);
+  fl_event_channel_send(self->event_channel, value, NULL, NULL);
 }
 
-// -------- IVpnManager handlers (MethodChannel "ivpn_manager") --------
-static FlMethodResponse* ivpn_start(VpnPlugin* self) {
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+static VpnState map_session_state(ag::VpnSessionState state) {
+  switch (state) {
+    case ag::VPN_SS_CONNECTING:
+      return VPN_STATE_CONNECTING;
+    case ag::VPN_SS_CONNECTED:
+      return VPN_STATE_CONNECTED;
+    case ag::VPN_SS_WAITING_RECOVERY:
+    case ag::VPN_SS_RECOVERING:
+    case ag::VPN_SS_WAITING_FOR_NETWORK:
+      return VPN_STATE_CONNECTING;
+    case ag::VPN_SS_DISCONNECTED:
+    default:
+      return VPN_STATE_DISCONNECTED;
+  }
+}
+
+static void native_state_changed(VpnPlugin* self, ag::VpnSessionState state) {
+  self->storage->vpn_state = map_session_state(state);
+  emit_vpn_state(self, self->storage->vpn_state);
+}
+
+static gchar* find_trusttunnel_helper_path(void) {
+  gchar exe_path[PATH_MAX + 1] = {};
+  const ssize_t len = readlink("/proc/self/exe", exe_path, PATH_MAX);
+  if (len > 0) {
+    exe_path[len] = '\0';
+    g_autofree gchar* exe_dir = g_path_get_dirname(exe_path);
+    g_autofree gchar* sibling = g_build_filename(exe_dir, "trusttunnel_vpn_helper", NULL);
+    if (g_file_test(sibling, G_FILE_TEST_IS_EXECUTABLE)) {
+      return g_strdup(sibling);
+    }
+
+    g_autofree gchar* lib_sibling = g_build_filename(exe_dir, "lib", "trusttunnel_vpn_helper", NULL);
+    if (g_file_test(lib_sibling, G_FILE_TEST_IS_EXECUTABLE)) {
+      return g_strdup(lib_sibling);
+    }
+  }
+
+  return g_find_program_in_path("trusttunnel_vpn_helper");
+}
+
+static void helper_watch_cb(GPid pid, gint status, gpointer user_data) {
+  VpnPlugin* self = VPN_PLUGIN(user_data);
+  if (self->helper_pid == pid) {
+    self->helper_pid = 0;
+    self->storage->vpn_state = VPN_STATE_DISCONNECTED;
+    emit_vpn_state(self, self->storage->vpn_state);
+  }
+  g_spawn_close_pid(pid);
+  g_object_unref(self);
+}
+
+static FlMethodResponse* helper_start(VpnPlugin* self, const gchar* config_text) {
+  g_autofree gchar* helper_path = find_trusttunnel_helper_path();
+  if (helper_path == NULL) {
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "helper-missing",
+        "Bundled TrustTunnel privileged helper was not found.",
+        NULL));
+  }
+
+  g_autofree gchar* pkexec_path = g_find_program_in_path("pkexec");
+  if (pkexec_path == NULL) {
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "pkexec-missing",
+        "PolicyKit pkexec is required to start the TrustTunnel helper.",
+        NULL));
+  }
+
+  if (self->helper_pid != 0) {
+    kill(self->helper_pid, SIGTERM);
+    self->helper_pid = 0;
+  }
+  if (self->helper_config_path != NULL) {
+    g_unlink(self->helper_config_path);
+    g_clear_pointer(&self->helper_config_path, g_free);
+  }
+
+  GError* error = NULL;
+  gint fd = g_file_open_tmp("trusttunnel-helper-XXXXXX.toml", &self->helper_config_path, &error);
+  if (fd < 0) {
+    g_autofree gchar* message = g_strdup(error ? error->message : "Unable to create helper config.");
+    g_clear_error(&error);
+    return FL_METHOD_RESPONSE(fl_method_error_response_new("config-write-failed", message, NULL));
+  }
+
+  const size_t config_len = strlen(config_text);
+  const ssize_t written = write(fd, config_text, config_len);
+  close(fd);
+  if (written < 0 || static_cast<size_t>(written) != config_len) {
+    g_unlink(self->helper_config_path);
+    g_clear_pointer(&self->helper_config_path, g_free);
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "config-write-failed",
+        "TrustTunnel helper config could not be written completely.",
+        NULL));
+  }
+
+  gchar* argv[] = {
+    pkexec_path,
+    helper_path,
+    (gchar*)"--config",
+    self->helper_config_path,
+    NULL,
+  };
+
   self->storage->vpn_state = VPN_STATE_CONNECTING;
   emit_vpn_state(self, self->storage->vpn_state);
 
-  if (self->connect_timeout_id) g_source_remove(self->connect_timeout_id);
-  self->connect_timeout_id = g_timeout_add(2000, (GSourceFunc) (^(gpointer data) -> gboolean {
-    VpnPlugin* plugin = (VpnPlugin*)data;
-    plugin->storage->vpn_state = VPN_STATE_CONNECTED;
-    emit_vpn_state(plugin, plugin->storage->vpn_state);
-    plugin->connect_timeout_id = 0;
-    return G_SOURCE_REMOVE;
-  }), self);
+  if (!g_spawn_async(
+          NULL,
+          argv,
+          NULL,
+          G_SPAWN_DO_NOT_REAP_CHILD,
+          NULL,
+          NULL,
+          &self->helper_pid,
+          &error)) {
+    self->storage->vpn_state = VPN_STATE_DISCONNECTED;
+    emit_vpn_state(self, self->storage->vpn_state);
+    g_autofree gchar* message = g_strdup(error ? error->message : "Unable to start TrustTunnel helper.");
+    g_clear_error(&error);
+    return FL_METHOD_RESPONSE(fl_method_error_response_new("connect-failed", message, NULL));
+  }
 
+  g_child_watch_add(self->helper_pid, helper_watch_cb, g_object_ref(self));
+  self->storage->vpn_state = VPN_STATE_CONNECTED;
+  emit_vpn_state(self, self->storage->vpn_state);
   return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_null()));
+}
+
+static FlMethodResponse* native_start(VpnPlugin* self, const gchar* config_text) {
+  if (config_text == NULL || *config_text == '\0') {
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "bad-config",
+        "TrustTunnel configuration is empty.",
+        NULL));
+  }
+
+  if (geteuid() != 0) {
+    return helper_start(self, config_text);
+  }
+
+  try {
+    auto table = toml::parse(config_text);
+    auto config = ag::TrustTunnelConfig::build_config(table);
+    if (!config.has_value()) {
+      return FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "bad-config",
+          "TrustTunnel configuration could not be parsed.",
+          NULL));
+    }
+
+    if (self->native_client && self->native_client->client) {
+      self->native_client->client->disconnect();
+    } else if (!self->native_client) {
+      self->native_client = new NativeVpnClient();
+    }
+
+    ag::VpnCallbacks callbacks = {};
+    callbacks.protect_handler = [](ag::SocketProtectEvent*) {};
+    callbacks.verify_handler = [](ag::VpnVerifyCertificateEvent* event) {
+      if (event) {
+        event->result = 0;
+      }
+    };
+    callbacks.state_changed_handler = [self](ag::VpnStateChangedEvent* event) {
+      if (event) {
+        native_state_changed(self, event->state);
+      }
+    };
+    callbacks.client_output_handler = [](ag::VpnClientOutputEvent*) {};
+    callbacks.connection_info_handler = [](ag::VpnConnectionInfoEvent*) {};
+
+    self->storage->vpn_state = VPN_STATE_CONNECTING;
+    emit_vpn_state(self, self->storage->vpn_state);
+
+    self->native_client->client = std::make_unique<ag::TrustTunnelClient>(
+        std::move(config.value()),
+        std::move(callbacks));
+
+    auto result = self->native_client->client->connect(ag::TrustTunnelClient::AutoSetup{});
+    if (result) {
+      self->native_client->client.reset();
+      self->storage->vpn_state = VPN_STATE_DISCONNECTED;
+      emit_vpn_state(self, self->storage->vpn_state);
+      return FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "connect-failed",
+          "TrustTunnel native Linux connection failed. Check native logs for the detailed reason.",
+          NULL));
+    }
+
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_null()));
+  } catch (const std::exception& ex) {
+    self->storage->vpn_state = VPN_STATE_DISCONNECTED;
+    emit_vpn_state(self, self->storage->vpn_state);
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "bad-config",
+        ex.what(),
+        NULL));
+  }
+}
+#endif
+
+// -------- IVpnManager handlers (MethodChannel "ivpn_manager") --------
+[[maybe_unused]] static FlMethodResponse* ivpn_start(VpnPlugin* self) {
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  return native_start(self, NULL);
+#else
+  self->storage->vpn_state = VPN_STATE_DISCONNECTED;
+  emit_vpn_state(self, self->storage->vpn_state);
+  return FL_METHOD_RESPONSE(fl_method_error_response_new(
+      "native-backend-missing",
+      "Linux requires the TrustTunnel native TUN adapter.",
+      NULL));
+#endif
 }
 
 static FlMethodResponse* ivpn_stop(VpnPlugin* self) {
   if (self->connect_timeout_id) { g_source_remove(self->connect_timeout_id); self->connect_timeout_id = 0; }
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  if (self->helper_pid != 0) {
+    kill(self->helper_pid, SIGTERM);
+    self->helper_pid = 0;
+  }
+  if (self->helper_config_path != NULL) {
+    g_unlink(self->helper_config_path);
+    g_clear_pointer(&self->helper_config_path, g_free);
+  }
+  if (self->native_client && self->native_client->client) {
+    self->native_client->client->disconnect();
+    self->native_client->client.reset();
+  }
+#endif
   self->storage->vpn_state = VPN_STATE_DISCONNECTED;
   emit_vpn_state(self, self->storage->vpn_state);
   return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_null()));
@@ -280,9 +526,20 @@ static FlMethodResponse* ivpn_get_state(VpnPlugin* self) {
 static void ivpn_method_cb(FlMethodChannel* channel, FlMethodCall* call, gpointer user_data) {
   VpnPlugin* self = VPN_PLUGIN(user_data);
   const gchar* method = fl_method_call_get_name(call);
+  FlValue* args = fl_method_call_get_args(call);
   g_autoptr(FlMethodResponse) resp = NULL;
 
-  if (g_strcmp0(method, "start") == 0) resp = ivpn_start(self);
+  if (g_strcmp0(method, "start") == 0) {
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+    FlValue* config = args ? fl_value_lookup_string(args, "config") : NULL;
+    const gchar* config_text = (config && fl_value_get_type(config) == FL_VALUE_TYPE_STRING)
+        ? fl_value_get_string(config)
+        : NULL;
+    resp = native_start(self, config_text);
+#else
+    resp = ivpn_start(self);
+#endif
+  }
   else if (g_strcmp0(method, "stop") == 0) resp = ivpn_stop(self);
   else if (g_strcmp0(method, "getCurrentState") == 0) resp = ivpn_get_state(self);
   else resp = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
@@ -294,7 +551,7 @@ static void ivpn_method_cb(FlMethodChannel* channel, FlMethodCall* call, gpointe
 static FlMethodResponse* storage_get_servers(VpnPlugin* self) {
   FlValue* list = fl_value_new_list();
   for (guint i = 0; i < self->storage->servers->len; i++) {
-    Server* s = g_ptr_array_index(self->storage->servers, i);
+    Server* s = static_cast<Server*>(g_ptr_array_index(self->storage->servers, i));
     FlValue* m = fl_value_new_map();
     fl_value_set_string_take(m, "id", fl_value_new_int(s->id));
     fl_value_set_string_take(m, "ipAddress", fl_value_new_string(s->ip_address));
@@ -303,7 +560,7 @@ static FlMethodResponse* storage_get_servers(VpnPlugin* self) {
     fl_value_set_string_take(m, "password", fl_value_new_string(s->password));
     FlValue* dns = fl_value_new_list();
     for (guint d = 0; d < s->dns_servers->len; d++) {
-      fl_value_append_take(dns, fl_value_new_string(g_ptr_array_index(s->dns_servers, d)));
+      fl_value_append_take(dns, fl_value_new_string(static_cast<const gchar*>(g_ptr_array_index(s->dns_servers, d))));
     }
     fl_value_set_string_take(m, "dnsServers", dns);
     fl_value_set_string_take(m, "vpnProtocol", fl_value_new_int(s->vpn_protocol));
@@ -316,19 +573,19 @@ static FlMethodResponse* storage_get_servers(VpnPlugin* self) {
 static FlMethodResponse* storage_get_profiles(VpnPlugin* self) {
   FlValue* list = fl_value_new_list();
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     FlValue* m = fl_value_new_map();
     fl_value_set_string_take(m, "id", fl_value_new_int(p->id));
     fl_value_set_string_take(m, "name", fl_value_new_string(p->name));
     fl_value_set_string_take(m, "defaultMode", fl_value_new_int(p->default_mode));
     FlValue* bypass = fl_value_new_list();
     for (guint b = 0; b < p->bypass_rules->len; b++)
-      fl_value_append_take(bypass, fl_value_new_string(g_ptr_array_index(p->bypass_rules, b)));
+      fl_value_append_take(bypass, fl_value_new_string(static_cast<const gchar*>(g_ptr_array_index(p->bypass_rules, b))));
     fl_value_set_string_take(m, "bypassRules", bypass);
 
     FlValue* vpn = fl_value_new_list();
     for (guint b = 0; b < p->vpn_rules->len; b++)
-      fl_value_append_take(vpn, fl_value_new_string(g_ptr_array_index(p->vpn_rules, b)));
+      fl_value_append_take(vpn, fl_value_new_string(static_cast<const gchar*>(g_ptr_array_index(p->vpn_rules, b))));
     fl_value_set_string_take(m, "vpnRules", vpn);
 
     fl_value_append_take(list, m);
@@ -402,7 +659,7 @@ static FlMethodResponse* servers_add(VpnPlugin* self, FlValue* args) {
   // new id
   gint64 nid = 1;
   for (guint i = 0; i < self->storage->servers->len; i++) {
-    Server* s = g_ptr_array_index(self->storage->servers, i);
+    Server* s = static_cast<Server*>(g_ptr_array_index(self->storage->servers, i));
     if (s->id >= nid) nid = s->id + 1;
   }
   g_ptr_array_add(self->storage->servers, server_new(nid, ip, domain, username, password, dns, (VpnProtocol)proto, profile_id));
@@ -430,7 +687,7 @@ static FlMethodResponse* servers_set(VpnPlugin* self, FlValue* args) {
   if (dns->len == 0) { string_array_free(dns); return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_int(5))); }
 
   for (guint i = 0; i < self->storage->servers->len; i++) {
-    Server* s = g_ptr_array_index(self->storage->servers, i);
+    Server* s = static_cast<Server*>(g_ptr_array_index(self->storage->servers, i));
     if (s->id == id) {
       Server* updated = server_new(id, ip, domain, user, pass, dns, (VpnProtocol)proto, profile_id);
       server_free(s);
@@ -457,7 +714,7 @@ static FlMethodResponse* servers_remove(VpnPlugin* self, FlValue* args) {
   gint64 id = fl_value_get_int(v);
 
   for (guint i = 0; i < self->storage->servers->len; ) {
-    Server* s = g_ptr_array_index(self->storage->servers, i);
+    Server* s = static_cast<Server*>(g_ptr_array_index(self->storage->servers, i));
     if (s->id == id) {
       server_free(s);
       g_ptr_array_remove_index_fast(self->storage->servers, i);
@@ -490,7 +747,7 @@ static FlMethodResponse* routing_add_profile(VpnPlugin* self) {
   // new id
   gint64 nid = 1;
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     if (p->id >= nid) nid = p->id + 1;
   }
   g_ptr_array_add(self->storage->routing_profiles,
@@ -505,7 +762,7 @@ static FlMethodResponse* routing_set_mode(VpnPlugin* self, FlValue* args) {
   gint64 id = fl_value_get_int(fl_value_lookup_string(args, "id"));
   gint   mode = fl_value_get_int(fl_value_lookup_string(args, "mode"));
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     if (p->id == id) { p->default_mode = (RoutingMode)mode; break; }
   }
   return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_null()));
@@ -515,7 +772,7 @@ static FlMethodResponse* routing_set_name(VpnPlugin* self, FlValue* args) {
   gint64 id = fl_value_get_int(fl_value_lookup_string(args, "id"));
   const gchar* name = fl_value_get_string(fl_value_lookup_string(args, "name"));
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     if (p->id == id) { g_free(p->name); p->name = g_strdup_or_empty(name); break; }
   }
   return FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_null()));
@@ -528,7 +785,7 @@ static FlMethodResponse* routing_set_rules(VpnPlugin* self, FlValue* args) {
 
   GPtrArray* arr = string_split_csv(rules, "\n");
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     if (p->id == id) {
       if (mode == ROUTING_MODE_BYPASS) { string_array_free(p->bypass_rules); p->bypass_rules = arr; }
       else { string_array_free(p->vpn_rules); p->vpn_rules = arr; }
@@ -543,7 +800,7 @@ static FlMethodResponse* routing_set_rules(VpnPlugin* self, FlValue* args) {
 static FlMethodResponse* routing_remove_all_rules(VpnPlugin* self, FlValue* args) {
   gint64 id = fl_value_get_int(fl_value_lookup_string(args, "id"));
   for (guint i = 0; i < self->storage->routing_profiles->len; i++) {
-    RoutingProfile* p = g_ptr_array_index(self->storage->routing_profiles, i);
+    RoutingProfile* p = static_cast<RoutingProfile*>(g_ptr_array_index(self->storage->routing_profiles, i));
     if (p->id == id) {
       string_array_free(p->bypass_rules); p->bypass_rules = g_ptr_array_new_with_free_func(g_free);
       string_array_free(p->vpn_rules);    p->vpn_rules    = g_ptr_array_new_with_free_func(g_free);
@@ -571,24 +828,42 @@ static void routing_method_cb(FlMethodChannel* channel, FlMethodCall* call, gpoi
 }
 
 // -------- EventChannel handler --------
-static FlStreamHandle* on_event_listen(FlEventChannel* channel,
-                                       FlValue* args,
-                                       gpointer user_data) {
+static FlMethodErrorResponse* on_event_listen(FlEventChannel* channel,
+                                              FlValue* args,
+                                              gpointer user_data) {
   VpnPlugin* self = VPN_PLUGIN(user_data);
-  self->event_sink = fl_event_channel_create_stream(channel, NULL);
+  self->event_listening = TRUE;
   emit_vpn_state(self, self->storage->vpn_state);
-  return (FlStreamHandle*)self->event_sink;
+  return NULL;
 }
 
-static void on_event_cancel(FlEventChannel* channel, FlStreamHandle* handle, gpointer user_data) {
+static FlMethodErrorResponse* on_event_cancel(FlEventChannel* channel, FlValue* args, gpointer user_data) {
   VpnPlugin* self = VPN_PLUGIN(user_data);
-  self->event_sink = NULL;
+  self->event_listening = FALSE;
+  return NULL;
 }
 
 // -------- GObject lifecycle --------
 static void vpn_plugin_dispose(GObject* object) {
   VpnPlugin* self = VPN_PLUGIN(object);
   if (self->connect_timeout_id) g_source_remove(self->connect_timeout_id);
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  if (self->helper_pid != 0) {
+    kill(self->helper_pid, SIGTERM);
+    self->helper_pid = 0;
+  }
+  if (self->helper_config_path != NULL) {
+    g_unlink(self->helper_config_path);
+    g_clear_pointer(&self->helper_config_path, g_free);
+  }
+  if (self->native_client) {
+    if (self->native_client->client) {
+      self->native_client->client->disconnect();
+    }
+    delete self->native_client;
+    self->native_client = NULL;
+  }
+#endif
   if (self->storage) { storage_free(self->storage); self->storage = NULL; }
   G_OBJECT_CLASS(vpn_plugin_parent_class)->dispose(object);
 }
@@ -600,9 +875,14 @@ static void vpn_plugin_class_init(VpnPluginClass* klass) {
 static void vpn_plugin_init(VpnPlugin* self) {
   self->storage = storage_new();
   self->event_channel = NULL;
-  self->event_sink = NULL;
+  self->event_listening = FALSE;
   self->ch_ivpn = self->ch_storage = self->ch_servers = self->ch_routing = NULL;
   self->connect_timeout_id = 0;
+#if defined(TRUSTTUNNEL_NATIVE_BACKEND)
+  self->native_client = NULL;
+  self->helper_pid = 0;
+  self->helper_config_path = NULL;
+#endif
 }
 
 void vpn_plugin_register_with_registrar(FlPluginRegistrar* registrar) {

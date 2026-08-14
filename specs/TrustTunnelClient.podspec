@@ -11,7 +11,12 @@ Pod::Spec.new do |s|
   s.authors      = { "AdGuard Dev Team" => "devteam@adguard.com" }
   s.ios.deployment_target = '14.0'
   s.osx.deployment_target = '15.5'
-  s.source       = { :http => "https://#{ENV['GPR_KEY']}:@maven.pkg.github.com/TrustTunnel/TrustTunnelClient/com/adguard/trusttunnel/trusttunnel-client-apple/#{s.version.to_s}/TrustTunnelClient-apple-#{s.version.to_s}.zip" }
+  if File.exist?(File.expand_path("TrustTunnelClient.xcframework", __dir__)) &&
+     File.exist?(File.expand_path("VpnClientFramework.xcframework", __dir__))
+    s.source     = { :path => "." }
+  else
+    s.source     = { :http => "https://#{ENV['GPR_KEY']}:@maven.pkg.github.com/TrustTunnel/TrustTunnelClient/com/adguard/trusttunnel/trusttunnel-client-apple/#{s.version.to_s}/TrustTunnelClient-apple-#{s.version.to_s}.zip" }
+  end
 
   s.vendored_frameworks = ["TrustTunnelClient.xcframework", "VpnClientFramework.xcframework"]
 end

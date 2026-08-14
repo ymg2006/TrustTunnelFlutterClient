@@ -59,6 +59,7 @@ extension SnackBarExtension on BuildContext {
             data: message,
           ),
           behavior: behavior,
+          duration: duration ?? const Duration(seconds: 4),
           showCloseIcon: showCloseIcon,
           trailingActions: trailingActions,
           action: action,

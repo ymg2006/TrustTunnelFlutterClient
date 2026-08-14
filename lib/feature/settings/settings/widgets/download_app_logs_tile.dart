@@ -62,6 +62,7 @@ class _DownloadAppLogsTileState extends State<DownloadAppLogsTile> {
 
   void _showArchiveReadySnackBar(ExportLogsArchive archive) => context.showInfoSnackBar(
     message: context.ln.appLogsExportedSnackbar,
+    duration: const Duration(seconds: 20),
     trailingActions: defaultTargetPlatform == TargetPlatform.macOS
         ? const []
         : [

@@ -28,6 +28,7 @@ public class VpnPlugin: NSObject, FlutterPlugin {
         events_querylog.setStreamHandler(vpnImpl.queryLogHandler)
 
         self.vpnApi = vpnImpl
+        self.deepLink = deepLinkImpl
     }
 }
 
@@ -39,7 +40,7 @@ final class IVpnManagerImpl: NSObject, IVpnManager, FlutterStreamHandler {
     init(bundleIdentifier: String, appGroup: String) {
         super.init()
         self.vpnManager = VpnManager(bundleIdentifier: bundleIdentifier, appGroup: appGroup, stateChangeCallback: { [weak self] newState in
-            self?.state = VpnManagerState(rawValue: newState)!
+            self?.state = VpnManagerState(rawValue: newState) ?? .disconnected
         },
         connectionInfoCallback: { [weak self] info in
             DispatchQueue.main.async {

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -37,7 +39,16 @@ final class AdgShare implements ShareClient {
   Future<ShareResult> share(ShareRequest request) async {
     try {
       final payload = await _buildPayload(request);
-      final response = await _platform.share(payload);
+      Map<Object?, Object?>? response;
+      try {
+        response = await _platform.share(payload);
+      } on MissingPluginException {
+        response = await _shareWithDesktopFallback(payload);
+      }
+
+      if (response?['status'] == 'unavailable' && _canUseDesktopFallback) {
+        response = await _shareWithDesktopFallback(payload);
+      }
 
       return _mapResponse(response);
     } on ShareException catch (error) {
@@ -48,6 +59,38 @@ final class AdgShare implements ShareClient {
       return ShareFailure(error);
     }
   }
+
+  Future<Map<Object?, Object?>?> _shareWithDesktopFallback(SharePayload payload) async {
+    SharePayloadFile? file;
+    for (final item in payload.content) {
+      if (item is SharePayloadFile) {
+        file = item;
+        break;
+      }
+    }
+    if (file == null) {
+      return const {'status': 'unavailable'};
+    }
+
+    if (Platform.isWindows) {
+      await Process.start('explorer.exe', ['/select,${file.path}']);
+      return const {'status': 'success'};
+    }
+
+    if (Platform.isMacOS) {
+      await Process.start('open', ['-R', file.path]);
+      return const {'status': 'success'};
+    }
+
+    if (Platform.isLinux) {
+      await Process.start('xdg-open', [File(file.path).parent.path]);
+      return const {'status': 'success'};
+    }
+
+    return const {'status': 'unavailable'};
+  }
+
+  bool get _canUseDesktopFallback => Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
   Future<SharePayload> _buildPayload(ShareRequest request) async {
     if (request.content.isEmpty) {

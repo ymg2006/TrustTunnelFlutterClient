@@ -9,8 +9,8 @@ workspace:
   - packages/window_manager
 
 environment:
-  flutter: 3.38.3
-  sdk: 3.10.1
+  flutter: 3.41.8
+  sdk: 3.11.5
 
 dependencies:
   adg_share:
@@ -20,6 +20,7 @@ dependencies:
       url: https://github.com/AdguardTeam/adguard-dart-logger
       ref: v1.0.3
   app_links: 7.0.0
+  archive: 4.0.7
   collection: 1.19.1
   drift: 2.30.0
   file_picker: 10.3.10

@@ -2,6 +2,9 @@
 # installed. You should not increase this version, as doing so will cause
 # the plugin to fail to compile for some customers of the plugin.
 cmake_minimum_required(VERSION 3.10)
+if (POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
 
 # Project-level configuration.
 set(PROJECT_NAME "vpn_plugin")
@@ -16,6 +19,76 @@ list(APPEND PLUGIN_SOURCES
   "vpn_plugin.cc"
 )
 
+include(FetchContent)
+set(_trusttunnel_cached_source "${CMAKE_BINARY_DIR}/_deps/trusttunnel_client-src")
+if (EXISTS "${_trusttunnel_cached_source}/trusttunnel/CMakeLists.txt")
+  set(trusttunnel_client_SOURCE_DIR "${_trusttunnel_cached_source}")
+else()
+  FetchContent_Declare(
+    trusttunnel_client
+    GIT_REPOSITORY https://github.com/TrustTunnel/TrustTunnelClient.git
+    GIT_TAG e365309c7d6ad92a0f92096e613f9acd06fd1d5a
+  )
+
+  if (POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+  endif()
+  FetchContent_GetProperties(trusttunnel_client)
+  if (NOT trusttunnel_client_POPULATED)
+    FetchContent_Populate(trusttunnel_client)
+  endif()
+endif()
+
+set(_trusttunnel_conan_generators
+  "${CMAKE_BINARY_DIR}/trusttunnel-conan/build/Release/generators")
+if (NOT EXISTS "${_trusttunnel_conan_generators}")
+  find_program(_trusttunnel_conan_executable conan)
+  if (NOT _trusttunnel_conan_executable)
+    message(FATAL_ERROR "Conan is required to build the TrustTunnel Linux adapter. Install Conan 2 and rerun the build.")
+  endif()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${trusttunnel_client_SOURCE_DIR}/scripts/bootstrap_conan_deps.py"
+    RESULT_VARIABLE _trusttunnel_bootstrap_result
+    COMMAND_ECHO STDOUT)
+  if (NOT _trusttunnel_bootstrap_result EQUAL 0)
+    message(FATAL_ERROR "Conan dependency bootstrap failed for the TrustTunnel Linux adapter.")
+  endif()
+  execute_process(
+    COMMAND "${_trusttunnel_conan_executable}" install "${trusttunnel_client_SOURCE_DIR}"
+      --output-folder "${CMAKE_BINARY_DIR}/trusttunnel-conan"
+      --build missing
+      -s build_type=Release
+    RESULT_VARIABLE _trusttunnel_conan_result
+    COMMAND_ECHO STDOUT)
+  if (NOT _trusttunnel_conan_result EQUAL 0)
+    message(FATAL_ERROR "Conan dependency install failed for the TrustTunnel Linux adapter.")
+  endif()
+endif()
+if (EXISTS "${_trusttunnel_conan_generators}")
+  list(APPEND CMAKE_PREFIX_PATH "${_trusttunnel_conan_generators}")
+  list(APPEND CMAKE_MODULE_PATH "${_trusttunnel_conan_generators}")
+  set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
+endif()
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory(
+  "${trusttunnel_client_SOURCE_DIR}"
+  "${CMAKE_BINARY_DIR}/trusttunnel_linux_core")
+
+add_executable(trusttunnel_vpn_helper
+  "trusttunnel_vpn_helper.cc"
+)
+apply_standard_settings(trusttunnel_vpn_helper)
+target_compile_features(trusttunnel_vpn_helper PRIVATE cxx_std_20)
+target_link_libraries(trusttunnel_vpn_helper PRIVATE vpnlibs_trusttunnel)
+target_include_directories(trusttunnel_vpn_helper PRIVATE
+  "${trusttunnel_client_SOURCE_DIR}/trusttunnel/include"
+  "${trusttunnel_client_SOURCE_DIR}/core/include"
+  "${trusttunnel_client_SOURCE_DIR}/net/include"
+  "${trusttunnel_client_SOURCE_DIR}/common/include")
+target_compile_definitions(trusttunnel_vpn_helper PRIVATE TRUSTTUNNEL_NATIVE_BACKEND)
+
 # Define the plugin library target. Its name must not be changed (see comment
 # on PLUGIN_NAME above).
 add_library(${PLUGIN_NAME} SHARED
@@ -26,6 +99,7 @@ add_library(${PLUGIN_NAME} SHARED
 # application-level CMakeLists.txt. This can be removed for plugins that want
 # full control over build settings.
 apply_standard_settings(${PLUGIN_NAME})
+target_compile_features(${PLUGIN_NAME} PRIVATE cxx_std_20)
 
 # Symbols are hidden by default to reduce the chance of accidental conflicts
 # between plugins. This should not be removed; any symbols that should be
@@ -40,12 +114,20 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
+target_link_libraries(${PLUGIN_NAME} PRIVATE vpnlibs_trusttunnel)
+add_dependencies(${PLUGIN_NAME} trusttunnel_vpn_helper)
+target_include_directories(${PLUGIN_NAME} PRIVATE
+  "${trusttunnel_client_SOURCE_DIR}/trusttunnel/include"
+  "${trusttunnel_client_SOURCE_DIR}/core/include"
+  "${trusttunnel_client_SOURCE_DIR}/net/include"
+  "${trusttunnel_client_SOURCE_DIR}/common/include")
+target_compile_definitions(${PLUGIN_NAME} PRIVATE TRUSTTUNNEL_NATIVE_BACKEND)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
 # external build triggered from this build file.
 set(vpn_plugin_bundled_libraries
-  ""
+  "$<TARGET_FILE:trusttunnel_vpn_helper>"
   PARENT_SCOPE
 )
 

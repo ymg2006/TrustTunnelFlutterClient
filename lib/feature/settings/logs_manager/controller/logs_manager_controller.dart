@@ -41,6 +41,10 @@ final class LogsManagerController extends BaseStateController<LogsManagerState> 
       );
 
       if (result != null) {
+        await _repository.saveExportFile(
+          data: archive.data,
+          path: result,
+        );
         onArchiveReady?.call(archive);
       } else {
         onCancelled?.call();
@@ -76,7 +80,7 @@ final class LogsManagerController extends BaseStateController<LogsManagerState> 
         path: filePath,
       );
 
-      await _shareClient.share(
+      final result = await _shareClient.share(
         ShareRequest(
           content: [
             ShareFile(
@@ -88,6 +92,13 @@ final class LogsManagerController extends BaseStateController<LogsManagerState> 
           chooserTitle: chooserTitle,
         ),
       );
+
+      switch (result) {
+        case ShareSuccess() || ShareDismissed():
+          break;
+        case ShareUnavailable() || ShareFailure():
+          onUnavailable?.call();
+      }
     },
     errorHandler: (error, stackTrace) {
       onUnavailable?.call();

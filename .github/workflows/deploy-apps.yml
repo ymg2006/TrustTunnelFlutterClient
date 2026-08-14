@@ -76,6 +76,27 @@ jobs:
             *)        echo "::error::Unknown channel: $CHANNEL"; exit 1 ;;
           esac
 
+  capabilities:
+    runs-on: ubuntu-latest
+    outputs:
+      signing-enabled: ${{ steps.check.outputs.signing-enabled }}
+      store-deploy-enabled: ${{ steps.check.outputs.store-deploy-enabled }}
+    steps:
+      - name: Check optional signing and store credentials
+        id: check
+        env:
+          VAULT_URL: ${{ vars.VAULT_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "$VAULT_URL" ]; then
+            echo "signing-enabled=true" >> "$GITHUB_OUTPUT"
+            echo "store-deploy-enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing-enabled=false" >> "$GITHUB_OUTPUT"
+            echo "store-deploy-enabled=false" >> "$GITHUB_OUTPUT"
+            echo "VAULT_URL is not configured; signed Apple builds and store deployment jobs will be skipped."
+          fi
+
   changelog-qa:
     needs: [meta]
     uses: AdGuardSoftwareLimited/actions/.github/workflows/collect-changelog.yml@master
@@ -114,7 +135,8 @@ jobs:
       release: ${{ needs.meta.outputs.release }}
 
   build-ios:
-    needs: [meta, build-number]
+    needs: [meta, build-number, capabilities]
+    if: needs.capabilities.outputs.signing-enabled == 'true'
     uses: ./.github/workflows/flutter-build-ios.yml
     secrets: inherit
     with:
@@ -143,7 +165,8 @@ jobs:
       artifact-path: ios/build/TrustTunnel.app.zip
 
   build-macos-appstore:
-    needs: [meta, build-number]
+    needs: [meta, build-number, capabilities]
+    if: needs.capabilities.outputs.signing-enabled == 'true'
     uses: ./.github/workflows/flutter-build-macos.yml
     secrets: inherit
     with:
@@ -159,7 +182,8 @@ jobs:
       release: ${{ needs.meta.outputs.release }}
 
   deploy-testflight:
-    needs: [meta, build-ios, changelog-public]
+    needs: [meta, build-ios, changelog-public, capabilities]
+    if: needs.capabilities.outputs.store-deploy-enabled == 'true'
     uses: AdGuardSoftwareLimited/actions/.github/workflows/deploy-to-testflight.yml@master
     with:
       team: flutter
@@ -171,7 +195,8 @@ jobs:
       environment: ${{ needs.meta.outputs.release-channel }}-testflight
 
   deploy-google-play:
-    needs: [meta, params, build-number, build-android, changelog-public]
+    needs: [meta, params, build-number, build-android, changelog-public, capabilities]
+    if: needs.capabilities.outputs.store-deploy-enabled == 'true'
     uses: AdGuardSoftwareLimited/actions/.github/workflows/deploy-to-google-play.yml@master
     with:
       team: flutter
@@ -195,7 +220,8 @@ jobs:
       environment: ${{ needs.meta.outputs.release-channel }}-appetize
 
   deploy-macos-testflight:
-    needs: [meta, build-macos-appstore, changelog-public]
+    needs: [meta, build-macos-appstore, changelog-public, capabilities]
+    if: needs.capabilities.outputs.store-deploy-enabled == 'true'
     uses: AdGuardSoftwareLimited/actions/.github/workflows/deploy-to-testflight.yml@master
     with:
       team: flutter

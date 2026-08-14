@@ -39,6 +39,9 @@ def getSigningProp = { String name ->
     return v != null ? v.toString() : null
 }
 
+def releaseKeyStorePath = getSigningProp("signingConfigKeyStorePath")
+def hasReleaseSigning = releaseKeyStorePath != null && !releaseKeyStorePath.isBlank()
+
 android {
     namespace = "com.adguard.trusttunnel"
     compileSdk = 36
@@ -68,14 +71,16 @@ android {
         release {
             keyAlias = getSigningProp("signingConfigKeyAlias")
             keyPassword = getSigningProp("signingConfigKeyPassword")
-            storeFile = rootProject.file(getSigningProp("signingConfigKeyStorePath"))
+            if (hasReleaseSigning) {
+                storeFile = rootProject.file(releaseKeyStorePath)
+            }
             storePassword = getSigningProp("signingConfigKeyStorePassword")
         }
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
         }
     }
 }

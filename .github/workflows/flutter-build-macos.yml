@@ -62,8 +62,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      GPR_KEY: ${{ secrets.PUBLIC_REPO_GPR_KEY }}
     steps:
       - name: Fix Flutter git safe directory
         run: git config --global --add safe.directory /opt/flutter
@@ -94,6 +92,14 @@ jobs:
           bundle config set --local path '.bundle/vendor'
           bundle install
           cd ..
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Prepare TrustTunnelClient Apple from source
+        run: bash .github/scripts/prepare-trusttunnel-apple-source.sh
 
       - name: macOS system-extension entitlements update
         if: inputs.macos-signing-type == 'developer_id'

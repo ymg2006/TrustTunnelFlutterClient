@@ -1,18 +1,27 @@
 #ifndef FLUTTER_PLUGIN_VPN_PLUGIN_H_
 #define FLUTTER_PLUGIN_VPN_PLUGIN_H_
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WINSOCKAPI_
+#include <winsock2.h>
+#endif
+
 #include <flutter/event_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
 
+#include "runner/platform_api.g.h"
+
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace vpn_plugin {
 
-enum class VpnManagerState : int64_t { kDisconnected = 0, kConnecting = 1, kConnected = 2 };
 enum class VpnProtocol : int64_t { kQuic = 0, kHttp2 = 1 };
 enum class RoutingMode : int64_t { kVpn = 0, kBypass = 1 };
 
@@ -55,11 +64,6 @@ enum class AddNewServerResult : int64_t {
   kDnsServersIncorrect = 5
 };
 
-void IVpnManagerSetupSetUp(flutter::BinaryMessenger*, void* /*api*/);
-void IStorageManagerSetupSetUp(flutter::BinaryMessenger*, void* /*api*/);
-void ServersManagerSetupSetUp(flutter::BinaryMessenger*, void* /*api*/);
-void RoutingProfilesManagerSetupSetUp(flutter::BinaryMessenger*, void* /*api*/);
-
 class MockStorage {
  public:
   MockStorage();
@@ -85,8 +89,7 @@ class MockStorage {
 class VpnEventStreamHandler
     : public flutter::StreamHandler<flutter::EncodableValue> {
  public:
-  explicit VpnEventStreamHandler(MockStorage* storage,
-                                 std::shared_ptr<flutter::TaskRunner> ui_runner);
+  VpnEventStreamHandler();
 
   void EmitState(VpnManagerState state);
 
@@ -99,24 +102,26 @@ class VpnEventStreamHandler
       const flutter::EncodableValue* arguments) override;
 
  private:
-  MockStorage* storage_;
-  std::shared_ptr<flutter::TaskRunner> ui_runner_;
+  VpnManagerState state_ = VpnManagerState::kDisconnected;
   std::mutex mutex_;
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> sink_;
 };
 
-class IVpnManagerImpl {
+class IVpnManagerImpl : public IVpnManager {
  public:
-  IVpnManagerImpl(MockStorage* storage, VpnEventStreamHandler* handler,
-                  std::shared_ptr<flutter::TaskRunner> ui_runner);
-  void Start();
-  void Stop();
-  VpnManagerState GetCurrentState();
+  explicit IVpnManagerImpl(VpnEventStreamHandler* handler);
+  ~IVpnManagerImpl() override;
+
+  std::optional<FlutterError> Start(const std::string& config) override;
+  std::optional<FlutterError> Stop() override;
+  std::optional<FlutterError> UpdateConfiguration(const std::string* config) override;
+  ErrorOr<VpnManagerState> GetCurrentState() override;
+  ErrorOr<flutter::EncodableList> ExportLogs() override;
+  std::optional<FlutterError> ClearLogs() override;
 
  private:
-  MockStorage* storage_;
   VpnEventStreamHandler* handler_;
-  std::shared_ptr<flutter::TaskRunner> ui_runner_;
+  VpnManagerState state_ = VpnManagerState::kDisconnected;
 };
 
 class StorageManagerImpl {
@@ -179,7 +184,6 @@ class VpnPlugin : public flutter::Plugin {
 
   explicit VpnPlugin(
       std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>> event_channel,
-      std::shared_ptr<MockStorage> storage,
       std::unique_ptr<VpnEventStreamHandler> handler,
       std::unique_ptr<IVpnManagerImpl> vpn_manager,
       std::unique_ptr<StorageManagerImpl> storage_manager,
@@ -193,7 +197,6 @@ class VpnPlugin : public flutter::Plugin {
 
  private:
   std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>> event_channel_;
-  std::shared_ptr<MockStorage> storage_;
   std::unique_ptr<VpnEventStreamHandler> handler_;
   std::unique_ptr<IVpnManagerImpl> vpn_manager_;
   std::unique_ptr<StorageManagerImpl> storage_manager_;

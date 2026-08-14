@@ -63,13 +63,12 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      GPR_KEY: ${{ secrets.PUBLIC_REPO_GPR_KEY }}
     steps:
       - name: Fix Flutter git safe directory
         run: git config --global --add safe.directory /opt/flutter
 
       - name: Fetch secrets from Vault
+        if: vars.VAULT_URL != ''
         uses: hashicorp/vault-action@v4
         with:
           url: ${{ vars.VAULT_URL }}
@@ -88,9 +87,21 @@ jobs:
       - name: Apply PR overrides
         uses: AdGuardSoftwareLimited/actions/actions/apply-pr-overrides@master
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Prepare TrustTunnelClient Android from source
+        run: bash .github/scripts/prepare-trusttunnel-android-source.sh
+
       - name: Prepare Android signing
         run: |
           set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "Android signing key is not configured; release build will use the Gradle fallback signing config."
+            exit 0
+          fi
           echo "$KEYSTORE_BASE64" | base64 -d > /tmp/trusttunnel.keystore
           echo "ORG_GRADLE_PROJECT_signingConfigKeyStorePath=/tmp/trusttunnel.keystore" >> "$GITHUB_ENV"
 

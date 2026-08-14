@@ -1,0 +1,91 @@
+name: Flutter Build Windows
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        default: trusttunnel-windows
+      artifact-path:
+        type: string
+        default: build/windows/x64/runner/Release/**
+  workflow_dispatch:
+    inputs:
+      artifact-name:
+        type: string
+        default: trusttunnel-windows
+      artifact-path:
+        type: string
+        default: build/windows/x64/runner/Release/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.8'
+          channel: stable
+          cache: true
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Conan
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "conan>=2,<3"
+          conan profile detect --force
+
+      - name: Install native dependency tools
+        run: choco install strawberryperl nasm ninja -y --no-progress
+
+      - name: Restore Conan cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: windows-conan2-${{ hashFiles('plugins/vpn_plugin/windows/CMakeLists.txt') }}
+          restore-keys: windows-conan2-
+
+      - name: Verify TrustTunnel Conan bootstrap is present
+        run: |
+          Write-Host "Checked out SHA: $env:GITHUB_SHA"
+          $matches = Select-String -Path plugins/vpn_plugin/windows/CMakeLists.txt -Pattern 'bootstrap_trusttunnel_conan.py' -SimpleMatch
+          $matches | ForEach-Object { Write-Host $_.Line }
+          if (-not $matches) {
+            throw "Windows adapter CMake does not contain bootstrap_trusttunnel_conan.py; this checkout is missing the Conan bootstrap fix."
+          }
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: |
+          dart run build_runner build --delete-conflicting-outputs
+          dart run intl_utils:generate
+          Push-Location plugins/vpn_plugin
+          dart run pigeon --input pigeons/platform_api.dart --cpp_header_out windows/runner/platform_api.g.h --cpp_source_out windows/runner/platform_api.g.cpp --dart_out lib/platform_api.g.dart --swift_out ios/Classes/PlatformApi.g.swift
+          dart run pigeon --input pigeons/platform_api.dart --swift_out macos/Classes/PlatformApi.g.swift
+          Pop-Location
+
+      - name: Build Windows
+        run: flutter build windows --release --no-pub
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error

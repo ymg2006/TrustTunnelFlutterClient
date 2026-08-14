@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:trusttunnel/common/theme/dark_theme.dart';
 import 'package:trusttunnel/common/theme/light_theme.dart';
 import 'package:trusttunnel/common/utils/certificate_encoders.dart';
 import 'package:trusttunnel/data/database/app_database.dart' as db;
@@ -43,6 +44,8 @@ abstract class DependencyFactory {
   abstract final FileLogStorage logStorage;
 
   ThemeData get lightThemeData;
+
+  ThemeData get darkThemeData;
 
   VpnPlugin get vpnPlugin;
 
@@ -95,6 +98,8 @@ class DependencyFactoryImpl implements DependencyFactory {
 
   ThemeData? _lightThemeData;
 
+  ThemeData? _darkThemeData;
+
   VpnPlugin? _vpnPlugin;
 
   DeepLinkManager? _deepLinkManager;
@@ -129,6 +134,9 @@ class DependencyFactoryImpl implements DependencyFactory {
 
   @override
   ThemeData get lightThemeData => _lightThemeData ??= LightTheme().data;
+
+  @override
+  ThemeData get darkThemeData => _darkThemeData ??= DarkTheme().data;
 
   @override
   VpnPlugin get vpnPlugin => _vpnPlugin ??= VpnPluginImpl();

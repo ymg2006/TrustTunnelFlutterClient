@@ -1,0 +1,14 @@
+13
+assets/images/about_desktop.webp
+lib/common/assets/assets_images.dart
+lib/common/router/app_route.dart
+lib/common/router/app_routes.dart
+lib/feature/app/controller/macos_app_window_controller.dart
+lib/feature/navigation/navigation_screen.dart
+lib/feature/server/servers/widget/servers_empty_placeholder.dart
+lib/feature/settings/app_logging/widgets/app_logging_body.dart
+lib/feature/settings/app_logging/widgets/app_logging_screen.dart
+lib/feature/settings/query_log/widgets/query_log_empty_placeholder.dart
+lib/feature/settings/settings/settings_screen.dart
+lib/feature/settings/settings_about/about_screen.dart
+lib/widgets/default_page.dart
