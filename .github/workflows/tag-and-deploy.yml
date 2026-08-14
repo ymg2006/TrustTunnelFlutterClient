@@ -8,10 +8,6 @@ on:
         description: 'Semver version tag to create, for example v1.3.0-beta.1 or v1.3.0'
         required: true
         type: string
-      slack-channel:
-        description: 'Slack channel for build notification'
-        type: string
-        default: '#build-trusttunnel'
       ref:
         description: 'Git ref SHA or branch to tag. If empty, tags the commit from the branch selected in UI.'
         type: string
@@ -29,11 +25,3 @@ jobs:
       team: flutter
       tag: ${{ inputs.tag }}
       ref: ${{ inputs.ref }}
-
-  deploy:
-    needs: tag
-    uses: ./.github/workflows/deploy-apps.yml
-    secrets: inherit
-    with:
-      tag: ${{ inputs.tag }}
-      slack-channel: ${{ inputs.slack-channel }}

@@ -247,10 +247,11 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "TrustTunnel $RELEASE_TAG" --notes "Automated multi-platform build."
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --target "$GITHUB_SHA" --title "TrustTunnel $RELEASE_TAG" --notes "Automated multi-platform build."
           fi
-          gh release upload "$RELEASE_TAG" release-packages/*.zip --clobber
+          gh release upload "$RELEASE_TAG" release-packages/*.zip --repo "$GH_REPO" --clobber
