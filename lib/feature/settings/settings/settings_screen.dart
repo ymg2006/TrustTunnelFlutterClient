@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:trusttunnel/common/extensions/context_extensions.dart';
 import 'package:trusttunnel/common/localization/localization.dart';
-import 'package:trusttunnel/common/utils/url_utils.dart';
 import 'package:trusttunnel/feature/settings/app_logging/widgets/app_logging_screen.dart';
 import 'package:trusttunnel/feature/settings/excluded_routes/widgets/excluded_routes_screen.dart';
 import 'package:trusttunnel/feature/settings/launch_and_connection/widgets/launch_and_connection_screen.dart';
@@ -54,11 +53,6 @@ class SettingsScreen extends StatelessWidget {
                 ),
                 const Divider(),
                 CustomArrowListTile(
-                  title: context.ln.followUsOnGithub,
-                  onTap: _openGithubOrganization,
-                ),
-                const Divider(),
-                CustomArrowListTile(
                   title: context.ln.about,
                   onTap: () => _pushAboutScreen(context),
                 ),
@@ -91,6 +85,4 @@ class SettingsScreen extends StatelessWidget {
   void _pushAboutScreen(BuildContext context) => context.push(
     const AboutScreen(),
   );
-
-  void _openGithubOrganization() => UrlUtils.openWebPage(UrlUtils.githubTrustTunnelTeam);
 }

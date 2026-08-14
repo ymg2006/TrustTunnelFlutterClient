@@ -27,7 +27,7 @@ import 'package:trusttunnel/feature/vpn/models/vpn_controller.dart';
 import 'package:trusttunnel/feature/vpn/widgets/vpn_scope.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Keeps the tray menu (currently only macOS) in sync with the app state and handles its actions.
+/// Keeps the tray menu in sync with the app state and handles its actions.
 class TrayMenuScope extends StatefulWidget {
   final Widget child;
   final Future<void> Function(AppRoute route) onRouteRequested;
@@ -54,17 +54,19 @@ class _TrayMenuScopeState extends State<TrayMenuScope> {
 
   bool get _isMacOS => defaultTargetPlatform == TargetPlatform.macOS;
 
+  bool get _supportsTray => _isMacOS || defaultTargetPlatform == TargetPlatform.windows;
+
   @override
   void initState() {
     super.initState();
-    _trayManager = _isMacOS ? TrayManagerMacOS() : null;
+    _trayManager = _supportsTray ? TrayManagerMacOS() : null;
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
 
-    if (_isMacOS) {
+    if (_supportsTray) {
       _vpnController = VpnScope.vpnControllerOf(context);
       _serversController = ServersScope.controllerOf(context);
       _appLoggingController = AppLoggingScope.controllerOf(context);
@@ -78,7 +80,7 @@ class _TrayMenuScopeState extends State<TrayMenuScope> {
 
   /// Queues a menu snapshot so asynchronous updates run in order.
   void _enqueueSync() {
-    if (!_isMacOS || !mounted) {
+    if (!_supportsTray || !mounted) {
       return;
     }
 
@@ -199,13 +201,15 @@ class _TrayMenuScopeState extends State<TrayMenuScope> {
     }
 
     final vpnState = _vpnController.state;
-    final shouldShowExitDialog = switch (vpnState) {
-      VpnState.connected || VpnState.connecting => true,
-      VpnState.disconnected ||
-      VpnState.waitingForRecovery ||
-      VpnState.recovering ||
-      VpnState.waitingForNetwork => false,
-    };
+    final shouldShowExitDialog =
+        _isMacOS &&
+        switch (vpnState) {
+          VpnState.connected || VpnState.connecting => true,
+          VpnState.disconnected ||
+          VpnState.waitingForRecovery ||
+          VpnState.recovering ||
+          VpnState.waitingForNetwork => false,
+        };
 
     if (shouldShowExitDialog) {
       final result = await MacosExitDialog.show(
@@ -219,7 +223,7 @@ class _TrayMenuScopeState extends State<TrayMenuScope> {
       }
     }
 
-    if (_isMacOS) {
+    if (_supportsTray) {
       await windowManager.setPreventClose(false);
     }
 
